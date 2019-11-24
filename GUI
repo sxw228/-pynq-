@@ -1,0 +1,822 @@
+import sys
+import os
+import cv2
+
+from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import QPalette, QBrush, QPixmap
+import socket
+import cv2
+import numpy
+import threading
+import math
+import serial
+from PyQt5 import QtCore, QtGui, QtWidgets, QtMultimedia
+
+
+serialPort = 'COM46'  # 串口
+baudRate = 115200  # 波特率
+is_exit=False
+data_bytes=bytearray()
+angle_list=[]
+dis_list=[]
+auto_flag=0
+image=cv2.imread("docu1.jpg")
+image1=cv2.imread('docu2.jpg')
+image2=cv2.imread('docu3.jpg')
+image_2=numpy.zeros([800, 800, 3], numpy.uint8)
+
+radar_state=0
+face_mode_state=0
+people_x=0
+people_y=0
+
+
+from_point_x=0
+from_point_y=0
+to_point_x=0
+to_point_y=0
+road_node=[]
+
+drone_target_x=0
+drone_target_y=0
+
+drone_x=100
+drone_y=100
+
+drone_pointer=0
+time_cnt=0
+
+
+flag_525=0
+
+class People:
+    def __init__(self,x,y,r):
+        self.x=x
+        self.y=y
+        self.r=r
+
+
+
+class SerialPort:
+    def __init__(self, port, buand):
+        self.port = serial.Serial(port, buand)
+        self.port.close()
+        if not self.port.isOpen():
+            self.port.open()
+
+    def port_open(self):
+        if not self.port.isOpen():
+            self.port.open()
+
+    def port_close(self):
+        self.port.close()
+
+    def send_data(self):
+        self.port.write('')
+
+    def read_data(self):
+        global is_exit
+        global data_bytes
+        while not is_exit:
+            count = self.port.inWaiting()
+            if count > 0:
+                rec_str = self.port.read(count)
+                data_bytes=data_bytes+rec_str
+                #print('当前数据接收总字节数：'+str(len(data_bytes))+' 本次接收字节数：'+str(len(rec_str)))
+
+
+
+
+class myLabel(QtWidgets.QLabel):  # 自定义的QLabel类
+
+    def __init__(self, parent=None):
+
+        super(myLabel, self).__init__(parent)
+
+        #state: 0未点击 1 设置了起点  2 设置了终点 3 再点一次 开始导航
+    def cal_point(self,ex,ey):
+        return_val=0
+        if ex<200 and ey<200:
+            return_val=0
+        elif ex<200 and ey>200:
+            return_val=1
+        elif ex>200 and ey<200:
+            return_val=2
+        else:
+            return_val=3
+        return return_val
+
+
+    def mousePressEvent(self, e):  ##重载一下鼠标点击事件
+
+        # 左键按下
+        global radar_state
+        global from_point_x
+        global from_point_y
+        global  people_x
+        global  people_y
+        global to_point_x
+        global to_point_y
+        global  drone_x
+        global  drone_y
+        global  drone_pointer
+        global  face_mode_state
+        if e.buttons() == QtCore.Qt.LeftButton:
+            face_mode_state=face_mode_state+1
+            print(face_mode_state)
+            if radar_state==0:
+                status=self.cal_point(e.x(),e.y())
+                if e.x()<300 and e.x()>100:
+                    from_point_x=e.x()
+                    from_point_y=e.y()
+                    radar_state=1
+            elif radar_state==1:
+                status=self.cal_point(e.x(),e.y())
+                if e.x()<300 and e.x()>100:
+                    to_point_x=e.x()
+                    to_point_y=e.y()
+                    radar_state=2
+            elif radar_state==2:
+
+                radar_state=4
+                drone_pointer=0
+            elif radar_state==4:
+                from_point_x=0
+                from_point_y=0
+                to_point_x=0
+                to_point_y=0
+                #road_node.clear()
+                radar_state=0
+
+
+        # 右键按下
+
+        elif e.buttons() == QtCore.Qt.RightButton:
+            drone_x=e.x()
+            drone_y=e.y()
+
+
+        # 中键按下
+
+        elif e.buttons() == QtCore.Qt.MidButton:
+
+            people_x=e.x()
+            people_y=e.y()
+
+        # 左右键同时按下
+
+        elif e.buttons() == QtCore.Qt.LeftButton | QtCore.Qt.RightButton:
+
+            self.setText("左右")
+
+        # 左中键同时按下
+
+        elif e.buttons() == QtCore.Qt.LeftButton | QtCore.Qt.MidButton:
+
+            self.setText("左中")
+
+        # 右中键同时按下
+
+        elif e.buttons() == QtCore.Qt.MidButton | QtCore.Qt.RightButton:
+
+            self.setText("右中")
+
+        # 左中右键同时按下
+
+        elif e.buttons() == QtCore.Qt.LeftButton | QtCore.Qt.MidButton | QtCore.Qt.RightButton:
+
+            self.setText("左中右")
+
+
+
+class Ui_MainWindow(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super(Ui_MainWindow, self).__init__(parent)
+
+
+
+        self.timer_camera = QtCore.QTimer()  # 初始化定时器
+        self.cap = cv2.VideoCapture()  # 初始化摄像头
+        self.CAM_NUM = 0
+        self.document_open_flag=0
+        self.set_ui()
+        self.slot_init()
+        self.__flag_work = 0
+        self.x = 0
+        self.count = 0
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.skt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.skt_2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.command = 0
+        self.radar_state_table=['empty','input p1..','intput p2...','ready','moving']
+        # 绑定地址和端口
+        open_radar_flag=0
+        open_pynq_flag=0
+        open_com_flag=0
+
+        if open_pynq_flag:
+            self.skt.bind(('192.168.43.205', 6053))
+
+            t = threading.Thread(target=self.udp_once)
+            t.start()
+        if open_radar_flag:
+            self.skt_2.bind(('192.168.43.228', 6054))
+            t_2 = threading.Thread(target=self.udp_once_2)
+            t_2.start()
+        if open_com_flag:
+            mSerial = SerialPort(serialPort, baudRate)
+
+        # 开始数据读取线程
+            t1 = threading.Thread(target=mSerial.read_data)
+            t1.setDaemon(True)
+            t1.start()
+
+    def udp_once(self):
+        global image
+        global drone_target_x
+        global drone_target_y
+        global to_point_x
+        global to_point_y
+        global radar_state
+        while True:
+            data, addr = self.skt.recvfrom(65507)
+            #self.skt.sendto(data, ('192.168.43.113', 6055))
+            img_data = numpy.fromstring(data, dtype='uint8')  # 按uint8转换为图像矩阵
+            '''
+            if self.command!=3 and self.command!=9 and self.command!=10:
+                str_to_send = str(self.command)
+                self.skt.sendto(str_to_send.encode(), addr)
+            if self.command==10:
+                str_to_send = '9'
+                self.skt.sendto(str_to_send.encode(), addr)
+            if self.command==9:
+                if radar_state==4:
+                    Uart_buf = bytearray([0x55,0x01,(drone_target_x & 0xff00) >>8 , drone_target_x & 0x00ff, ((748-2*drone_target_y) & 0xff00) >>8 , (748-2*drone_target_y) & 0x00ff, 0xAA])
+                if radar_state!=4:
+                    Uart_buf = bytearray([0x55, 0x00, (drone_target_x & 0xff00) >> 8, drone_target_x & 0x00ff,((525) & 0xff00) >> 8, (525)& 0x00ff, 0xAA])
+
+                self.skt.sendto(Uart_buf, addr)
+
+            if self.command==3:
+                str_to_send=str(self.command)+self.lineEdit.text()
+
+                self.skt.sendto(str_to_send.encode(), addr)
+            '''
+
+            #print( str(addr))
+            image = cv2.imdecode(img_data, 1)  # 图像解码
+
+    def getDis(self,pointX, pointY, lineX1, lineY1, lineX2, lineY2):
+
+        a = lineY2 - lineY1
+
+        b = lineX1 - lineX2
+
+        c = lineX2 * lineY1 - lineX1 * lineY2
+
+        dis = (math.fabs(a * pointX + b * pointY + c)) / (math.pow(a * a + b * b, 0.5))
+
+        return dis
+
+    def avoiding(self,p1x,p1y,p2x,p2y,cx,cy,r):
+        distance=self.getDis(cx,cy,p1x,p1y,p2x,p2y)
+        if distance>50:
+            k=1.0*(p2y-p1y)/(p2x-p1x)
+            a=cx+10/math.sqrt(1+1/(k*k))
+            b=-1*a*1/k+cy+cx/k
+            return a,b
+        else:
+            return 0,0
+
+
+    def add_node(self,px,py):
+        global  road_node
+        list_tmp=[]
+        list_tmp.append(px)
+        list_tmp.append(py)
+        road_node.append(list_tmp)
+    def show_line(self):
+        global  road_node
+        #self.clear_points()
+        for i in range(len(road_node)-1):
+            cv2.line(image_2, (road_node[i][0], road_node[i][1]),(road_node[i+1][0], road_node[i+1][1]), (255, 255, 255))
+    def clear_points(self):
+        global radar_state
+        radar_state=4
+    def udp_once_2(self):
+        global angle_list
+        global dis_list
+        while True:
+            data, addr = self.skt_2.recvfrom(65507)
+            img_data = numpy.fromstring(data, dtype='float32')  # 按uint8转换为图像矩阵
+            print('done')
+            img_list = img_data.tolist()
+            # print(len(img_list))
+            angle_list = []
+            dis_list = []
+            road_node=[]
+            for i in range(int(len(img_list) / 2)):
+                angle_list.append(img_list[2 * i])
+                dis_list.append(img_list[2 * i + 1])
+
+
+            #cv2.circle(image_2,(200,200),200,(255,0,0),1)
+
+
+    def set_ui(self):
+        self.__layout_mainmain = QtWidgets.QVBoxLayout()
+        self.__layout_main = QtWidgets.QHBoxLayout()  # 采用QHBoxLayout类，按照从左到右的顺序来添加控件
+        self.__layout_fun_button = QtWidgets.QVBoxLayout()
+        self.__layout_data_show = QtWidgets.QVBoxLayout()  # QVBoxLayout类垂直地摆放小部件
+
+        self.button_open_camera = QtWidgets.QPushButton(u'打开图传')
+        self.button_detect_number = QtWidgets.QPushButton(u'识别数字')
+        self.button_detect_road = QtWidgets.QPushButton(u'识别路标')
+        self.button_detect_road_plus = QtWidgets.QPushButton(u'路标PLUS')
+        self.button_auto = QtWidgets.QPushButton(u'定点飞行')
+        self.button_detect_car = QtWidgets.QPushButton(u'识别车牌')
+        self.button_detect_face = QtWidgets.QPushButton(u'识别人脸')
+        self.button_detect_face_input = QtWidgets.QPushButton(u'添加人脸')
+        self.button_document = QtWidgets.QPushButton(u'手势识别')
+        self.lineEdit = QtWidgets.QLineEdit(u'输入名字')
+        self.lineEdit.setGeometry(QtCore.QRect(210, 70, 181, 111))
+
+
+        # button颜色修改
+        button_color = [self.button_open_camera,self.button_detect_road,self.button_detect_number,self.button_detect_car,self.button_detect_face,self.button_detect_face_input, self.button_document,self.button_auto,self.button_detect_road_plus]
+        for i in range(9):
+            button_color[i].setStyleSheet("QPushButton{color:black}"
+                                           "QPushButton:hover{color:red}"
+                                           "QPushButton{background-color:rgb(78,255,255)}"
+                                           "QpushButton{border:2px}"
+                                           "QPushButton{padding:2px 4px}")
+
+            button_color[i].setMinimumHeight(50)
+
+
+        # move()方法是移动窗口在屏幕上的位置到x = 500，y = 500的位置上
+        self.move(500, 500)
+
+        # 信息显示
+        self.label_show_camera = QtWidgets.QLabel()
+
+        self.label_show_docu = QtWidgets.QLabel()
+        self.label_show_radar = myLabel()
+        self.label_move = QtWidgets.QLabel()
+        self.label_move.setFixedSize(100, 100)
+        self.label_show_camera.setFixedSize(641, 481)
+        self.label_show_camera.setAutoFillBackground(False)
+        self.label_show_docu.setFixedSize(1300, 260)
+        #self.label_show_docu.setAutoFillBackground(False)
+        self.label_show_radar.setFixedSize(400, 400)
+        self.label_show_radar.setAutoFillBackground(False)
+
+        self.__layout_fun_button.addWidget(self.button_open_camera)
+
+        self.__layout_fun_button.addWidget(self.button_detect_number)
+        self.__layout_fun_button.addWidget(self.button_detect_road)
+        self.__layout_fun_button.addWidget(self.button_detect_road_plus)
+        self.__layout_fun_button.addWidget(self.button_auto)
+        self.__layout_fun_button.addWidget(self.button_detect_car)
+        self.__layout_fun_button.addWidget(self.button_detect_face)
+        self.__layout_fun_button.addWidget(self.button_detect_face_input)
+        #self.__layout_fun_button.addWidget(self.button_document)
+        #self.__layout_fun_button.addWidget(self.label_move)
+        self.__layout_fun_button.addWidget(self.lineEdit)
+
+        self.__layout_main.addLayout(self.__layout_fun_button)
+        self.__layout_main.addWidget(self.label_show_camera)
+        self.__layout_main.addWidget(self.label_show_radar)
+
+        show = cv2.resize(image_2, (640, 480))
+        show = cv2.cvtColor(show, cv2.COLOR_BGR2RGB)
+
+        showImage = QtGui.QImage(show.data, show.shape[1], show.shape[0], QtGui.QImage.Format_RGB888)
+        self.label_show_radar.setPixmap(QtGui.QPixmap.fromImage(showImage))
+        self.label_show_docu.setStyleSheet("background-color:white;")
+        self.label_show_docu.setPixmap(QPixmap('thedocu.jpg'))
+        self.__layout_mainmain.addLayout(self.__layout_main)
+        self.__layout_mainmain.addWidget(self.label_show_docu)
+
+        self.setLayout(self.__layout_mainmain)
+        self.label_move.raise_()
+        self.setWindowTitle(u'图传地面站-当前ip:192.168.2.226-by 宋长骏')
+        self.label_show_command = QtWidgets.QLabel()
+
+        self.__layout_fun_button.addWidget(self.label_show_command)
+        # 设置背景颜色
+        palette1 = QPalette()
+        palette1.setBrush(self.backgroundRole(),QBrush(QPixmap('background.jpg')))
+        self.setPalette(palette1)
+
+
+    def slot_init(self):  # 建立通信连接
+        self.button_open_camera.clicked.connect(self.button_open_camera_click)
+        self.button_detect_number.clicked.connect(self.button_detect_number_click)
+        self.button_detect_road.clicked.connect(self.button_detect_road_click)
+        self.button_detect_road_plus.clicked.connect(self.button_detect_road_plus_click)
+        self.button_detect_car.clicked.connect(self.button_detect_car_click)
+        self.button_detect_face.clicked.connect(self.button_detect_face_click)
+        self.button_detect_face_input.clicked.connect(self.button_detect_face_input_click)
+        self.button_auto.clicked.connect(self.button_auto_click)
+        self.timer_camera.timeout.connect(self.show_camera)
+        self.button_document.clicked.connect(self.button_docunment_click)
+
+    def button_open_camera_click(self):
+        if self.timer_camera.isActive() == False:
+            if True:
+                self.timer_camera.start(1)
+                self.button_open_camera.setText(u'关闭图传')
+        else:
+            self.timer_camera.stop()
+            self.label_show_camera.clear()
+            self.button_open_camera.setText(u'打开图传')
+
+    def button_docunment_click(self):
+
+        self.command = 6
+
+    def button_detect_number_click(self):
+        self.command=1
+
+    def button_detect_road_click(self):
+        self.command=4
+    def button_detect_road_plus_click(self):
+        self.command=10
+
+    def button_auto_click(self):
+        self.command=9
+
+    def button_detect_car_click(self):
+        self.command=5
+
+    def button_detect_face_click(self):
+        self.command=2
+
+    def button_detect_face_input_click(self):
+        self.command=3
+
+    def bi_zhang(self,cen,fx,tx,dx,dy):
+
+        dis = self.getDis(cen.x, cen.y, drone_x, drone_y, from_point_x, from_point_y)
+        road_node.clear()
+        if dis < cen.r:
+            if drone_x==from_point_x:
+                return
+            if drone_y==from_point_y:
+                return
+            k = (drone_y - from_point_y) / (drone_x - from_point_x)
+            b = from_point_y - k * from_point_x
+            A = -k
+            C = -b
+            a1 = (-1 * (2 * A * cen.y + (A * A - 1) * cen.x + 2 * A * C)) / (A * A + 1)
+            b1 = (-1 * ((1 - A * A) * cen.y + 2 * A * cen.x + 2 * C) / (1 + A * A))
+
+            k0 = (drone_y - from_point_y) / (drone_x - from_point_x)
+            k = -1 * 1 / k0
+            if a1 > cen.x:
+                theta = math.atan(k)
+                a = cen.x + 2 * cen.r * math.cos(theta)
+
+                b = cen.y + 2 * cen.r * math.sin(theta)
+            else:
+                theta = math.atan(k)
+                a = cen.x - 2 * cen.r * math.cos(theta)
+
+                b = cen.y - 2 * cen.r * math.sin(theta)
+
+            cv2.line(image_2, (cen.x, cen.y), (int(a), int(b)),
+                     (255, 255, 255))
+            absx = math.sqrt(2 * cen.r * cen.r / (1 + k0 * k0))
+
+            new_x1 = int((cen.x + a1) / 2 - absx)
+            new_y1 = int((cen.y + b1) / 2 - absx * k0)
+            new_x2 = int((cen.x + a1) / 2 + absx)
+            new_y2 = int((cen.y + b1) / 2 + absx * k0)
+            cv2.circle(image_2, (int((cen.x + a1) / 2 - absx), int((cen.y + b1) / 2 - absx * k0)), 2, (255, 0, 255), 1)
+            cv2.circle(image_2, (int((cen.x + a1) / 2 + absx), int((cen.y + b1) / 2 + absx * k0)), 2, (255, 0, 255), 1)
+
+            if drone_x<from_point_x:
+                self.add_node(drone_x, drone_y)
+                self.add_node(new_x1, new_y1)
+                self.add_node(int(a), int(b))
+                self.add_node(new_x2, new_y2)
+                self.add_node(from_point_x, from_point_y)
+            else:
+                self.add_node(drone_x, drone_y)
+                self.add_node(new_x2, new_y2)
+                self.add_node(int(a), int(b))
+                self.add_node(new_x1, new_y1)
+                self.add_node(from_point_x, from_point_y)
+        else:
+            self.add_node(drone_x, drone_y)
+            self.add_node(from_point_x, from_point_y)
+
+        dis = self.getDis(cen.x, cen.y, from_point_x, from_point_y, to_point_x, to_point_y)
+
+        if dis < cen.r:
+            if to_point_x==from_point_x:
+                return
+            if to_point_y==from_point_y:
+                return
+            k = (to_point_y - from_point_y) / (to_point_x - from_point_x)
+            b = to_point_y - k * to_point_x
+            A = -k
+            C = -b
+            a1 = (-1 * (2 * A * cen.y + (A * A - 1) * cen.x + 2 * A * C)) / (A * A + 1)
+            b1 = (-1 * ((1 - A * A) * cen.y + 2 * A * cen.x + 2 * C) / (1 + A * A))
+
+            k0 = (to_point_y - from_point_y) / (to_point_x - from_point_x)
+            k = -1 * 1 / k0
+            if a1 > cen.x:
+                theta = math.atan(k)
+                a = cen.x + 2 * cen.r * math.cos(theta)
+
+                b = cen.y + 2 * cen.r * math.sin(theta)
+            else:
+                theta = math.atan(k)
+                a = cen.x - 2 * cen.r * math.cos(theta)
+
+                b = cen.y - 2 * cen.r * math.sin(theta)
+
+            cv2.line(image_2, (cen.x, cen.y), (int(a), int(b)),
+                     (255, 255, 255))
+            absx = math.sqrt(2 * cen.r * cen.r / (1 + k0 * k0))
+
+            new_x1 = int((cen.x + a1) / 2 - absx)
+            new_y1 = int((cen.y + b1) / 2 - absx * k0)
+            new_x2 = int((cen.x + a1) / 2 + absx)
+            new_y2 = int((cen.y + b1) / 2 + absx * k0)
+            cv2.circle(image_2, (int((cen.x + a1) / 2 - absx), int((cen.y + b1) / 2 - absx * k0)), 2, (255, 0, 255), 1)
+            cv2.circle(image_2, (int((cen.x + a1) / 2 + absx), int((cen.y + b1) / 2 + absx * k0)), 2, (255, 0, 255), 1)
+
+            if fx<tx:
+                self.add_node(from_point_x, from_point_y)
+                self.add_node(new_x1, new_y1)
+                self.add_node(int(a), int(b))
+                self.add_node(new_x2, new_y2)
+                self.add_node(to_point_x, to_point_y)
+            else:
+                self.add_node(from_point_x, from_point_y)
+                self.add_node(new_x2, new_y2)
+                self.add_node(int(a), int(b))
+                self.add_node(new_x1, new_y1)
+                self.add_node(to_point_x, to_point_y)
+
+        else:
+            self.add_node(from_point_x, from_point_y)
+            self.add_node(to_point_x, to_point_y)
+    def point_dis(self,p1x,p1y,p2x,p2y):
+        x=p1x-p2x
+        y=p1y-p2y
+        len= math.sqrt((x**2)+(y**2))
+        return len
+    def draw_drone(self,img,x,y):
+        radius=10
+        cv2.circle(image_2, (x-10,y-10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (x-10, y+10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (x+10, y-10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (x+10, y+10), radius, (255, 0, 255), 1)
+    def updata_drone_pointer(self):
+        global  drone_pointer
+        global  road_node
+        global  time_cnt
+        if drone_pointer<len(road_node):
+            dis=self.point_dis(drone_x,drone_y,road_node[drone_pointer][0],road_node[drone_pointer][1])
+            if dis<30:
+                time_cnt = time_cnt + 1
+                if time_cnt == 200:
+
+                    time_cnt = 0
+                    drone_pointer=drone_pointer+1
+
+    def show_camera(self):
+
+        global radar_state
+        global from_point_x
+        global from_point_y
+        global angle_list
+        global dis_list
+        global to_point_x
+        global to_point_y
+        global road_node
+        global  drone_x
+        global  drone_y
+        global  drone_target_x
+        global  drone_target_y
+        global  drone_pointer
+        global  time_cnt
+        global  face_mode_state
+
+
+        radar_radius=1.5
+
+        show = cv2.resize(image, (640, 480))
+        show = cv2.cvtColor(show, cv2.COLOR_BGR2RGB)
+
+        showImage = QtGui.QImage(show.data, show.shape[1], show.shape[0], QtGui.QImage.Format_RGB888)
+        self.label_show_camera.setPixmap(QtGui.QPixmap.fromImage(showImage))
+
+
+
+
+        image_2 = numpy.zeros([400, 400, 3], numpy.uint8)
+        image_3 = numpy.zeros([400, 400, 3], numpy.uint8)
+        cv2.circle(image_2, (200, 200), 50, (255, 255, 255), 3)
+        data_len = len(data_bytes)
+        i = 0
+        while(i<data_len-1):
+            if(data_bytes[i]==0x55 ):
+                if i<data_len-1-4:
+
+                    a = data_bytes[i+1:i+5]
+
+                    global drone_x
+                    global drone_y
+
+                    drone_x=200+int((256*a[0]+a[1]-540)*0.5 )
+                    drone_y=200-int((256*a[2]+a[3]-450)*0.5)
+                    #pstr='x='+str(256*a[0]+a[1])+'y='+str(256*a[2]+a[3])
+                    pstr = 'x=' + str(drone_x) + 'y=' + str(drone_y)
+                    #print(pstr)
+                i=i+6
+            else:
+                i=i+1
+        data_bytes[0:i]=b''
+        radius=10
+
+
+        cv2.circle(image_2, (drone_x-10,drone_y-10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (drone_x-10, drone_y+10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (drone_x+10, drone_y-10), radius, (255, 0, 255), 1)
+        cv2.circle(image_2, (drone_x+10, drone_y+10), radius, (255, 0, 255), 1)
+        cv2.line(image_2, (75,0),(75,400), (0, 0, 255), 3, 4)
+        cv2.line(image_2, (160,0),(160,400), (0, 0, 255), 3, 4)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        if len(dis_list) > 40:
+            for i in range(len(dis_list)-1):
+                if True:
+
+                    x, y = cv2.polarToCart(50 * dis_list[i], 270 + angle_list[i], angleInDegrees=True)
+                    x = x[0]
+                    y = y[0]+200
+                    if x>75 and x<200:
+                        if y>0 and y<400:
+                            cv2.circle(image_3, (x, y), 7, (0, 0, 255), 1)
+                            cv2.circle(image_2, (x, y), 7, (0, 0, 255), 1)
+        #cv2.circle(image_3, (people_x, people_y), 7, (0, 0, 255), 1)
+        #cv2.circle(image_2, (people_x, people_y), 7, (0, 0, 255), 1)
+        B, G, R = cv2.split(image_3)
+
+        cnts = cv2.findContours(R, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        cnts = cnts[1]
+        # cv2.drawContours(image_2,cnts, 5, (255, 255, 255), 2)
+        circle_list=[]
+        if len(cnts) > 0:
+            for c in cnts:
+                (x, y), radius = cv2.minEnclosingCircle(c)
+
+                # 转为整数 cast to integers
+                center = (int(x), int(y))
+                radius = int(radius)
+                # 绘圆 draw the circle
+                if radius>10:
+                    img = cv2.circle(image_2, center, radius  , (255, 255, 255), 2)
+                    circle_list.append(center)
+
+
+        cv2.putText(image_2, self.radar_state_table[radar_state],(100,20),  cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 1)
+        cv2.putText(image_2, str(drone_pointer), (380, 40), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 1)
+        list_temp = []
+
+        global  auto_flag
+        auto_flag=1
+        if auto_flag==1:
+            if len(circle_list)==1 and circle_list[0][0]>75 and circle_list[0][1]<280:
+
+
+                # 转为整数 cast to integers
+                center = circle_list[0]
+                from_point_x=100
+                from_point_y=center[1]+5
+                to_point_x=center[0]
+                to_point_y=center[1]
+                textttt='('+str(to_point_x)+','+str(to_point_y)+')'
+                if to_point_y<400:
+                    cv2.putText(image_2, textttt, (to_point_x, to_point_y), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 1)
+                    drone_target_x = to_point_x
+                    drone_target_y = to_point_y
+                cv2.circle(image_2, (to_point_x, to_point_y), 10, (0, 255, 255), 2)
+            if len(circle_list)==3 and circle_list[0][0]>75 and circle_list[0][1]<280 and circle_list[1][0]>75 and circle_list[1][1]<280  and circle_list[2][0]>75 and circle_list[2][1]<280:
+
+
+                # 转为整数 cast to integers
+                i=0
+                if circle_list[0][1]>circle_list[1][1] and circle_list[2][1]>circle_list[1][1]:
+                    i=1
+                if circle_list[0][1]>circle_list[2][1] and circle_list[1][1]>circle_list[2][1]:
+                    i=2
+                center = circle_list[i]
+                from_point_x=100
+                from_point_y=center[1]+5
+                to_point_x=center[0]
+                to_point_y=center[1]
+                textttt='('+str(to_point_x)+','+str(to_point_y)+')'
+                if to_point_y<400:
+                    cv2.putText(image_2, textttt, (to_point_x, to_point_y), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 1)
+                    drone_target_x = to_point_x
+                    drone_target_y = to_point_y
+                cv2.circle(image_2, (to_point_x, to_point_y), 10, (0, 255, 255), 2)
+        else:
+            if radar_state != 4:
+                people_list=[]
+                cen = People(400, 400, 1)
+                people_list.append(cen)
+
+                if from_point_x*from_point_y*to_point_y*to_point_x!=0:
+                    #self.add_node(from_point_x,from_point_y)
+                    #self.add_node(to_point_x,to_point_y)
+
+                    self.bi_zhang(cen,from_point_x,to_point_x,drone_x,drone_y)
+
+                    for i in range(len(road_node) - 1):
+                        cv2.line(image_2, (road_node[i][0], road_node[i][1]), (road_node[i + 1][0], road_node[i + 1][1]),
+                            (255, 255, 255))
+                    for item in road_node:
+                        img = cv2.circle(image_2, (item[0],item[1]), 30, (255, 255, 255), 2)
+            if radar_state == 4:
+                people_list=[]
+                cen = People(200, 200, 50)
+                people_list.append(cen)
+
+                if from_point_x*from_point_y*to_point_y*to_point_x!=0:
+                    self.updata_drone_pointer()
+                    if drone_pointer<len(road_node):
+                        loc='('+str(road_node[drone_pointer][0])+','+str(730-road_node[drone_pointer][1])+')'
+                        cv2.putText(image_2, loc, (road_node[drone_pointer][0], road_node[drone_pointer][1]), cv2.FONT_HERSHEY_COMPLEX,0.5, (0, 255, 0), 1)
+                        drone_target_x=road_node[drone_pointer][0]
+                        drone_target_y=road_node[drone_pointer][1]
+
+
+                    for i in range(drone_pointer,len(road_node) - 1):
+                        cv2.line(image_2, (road_node[i][0], road_node[i][1]), (road_node[i + 1][0], road_node[i + 1][1]),
+                            (255, 255, 255))
+                    for item in road_node:
+                        img = cv2.circle(image_2, (item[0],item[1]), 30, (255, 255, 255), 2)
+
+
+
+
+
+
+        show = cv2.resize(image_2, (400, 400))
+        show = cv2.cvtColor(show, cv2.COLOR_BGR2RGB)
+
+        showImage = QtGui.QImage(show.data, show.shape[1], show.shape[0], QtGui.QImage.Format_RGB888)
+        self.label_show_radar.setPixmap(QtGui.QPixmap.fromImage(showImage))
+
+    def closeEvent(self, event):
+        ok = QtWidgets.QPushButton()
+        cancel = QtWidgets.QPushButton()
+        msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, u'关闭', u'是否关闭！')
+        msg.addButton(ok, QtWidgets.QMessageBox.ActionRole)
+        msg.addButton(cancel, QtWidgets.QMessageBox.RejectRole)
+        ok.setText(u'确定')
+        cancel.setText(u'取消')
+        if msg.exec_() == QtWidgets.QMessageBox.RejectRole:
+            event.ignore()
+        else:
+            if self.cap.isOpened():
+                self.cap.release()
+            if self.timer_camera.isActive():
+                self.timer_camera.stop()
+            event.accept()
+
+
+if __name__ == '__main__':
+    App = QApplication(sys.argv)
+    win = Ui_MainWindow()
+    win.show()
+    sys.exit(App.exec_())
